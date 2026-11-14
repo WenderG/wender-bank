@@ -35,8 +35,8 @@ type Debt = {
   title: string;
   amount: number;
   paid: number;
+  installments: number; // total de parcelas
   due_date: string | null;
-  transaction_id: number;
   created_at: string;
 };
 
@@ -71,11 +71,17 @@ async function initialize(db: any) {
       title TEXT NOT NULL,
       amount REAL NOT NULL,
       paid REAL NOT NULL DEFAULT 0,
+      installments INTEGER DEFAULT 1,
       due_date TEXT,
-      transaction_id INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
   `);
+  // Garante a coluna installments em bancos antigos
+  try {
+    await db.execAsync(`ALTER TABLE debts ADD COLUMN installments INTEGER DEFAULT 1`);
+  } catch (_) {
+    // já existe
+  }
 }
 
 function AppContent() {
@@ -98,6 +104,7 @@ function AppContent() {
 
   const [debtTitle, setDebtTitle] = useState("");
   const [debtAmount, setDebtAmount] = useState("");
+  const [debtInstallments, setDebtInstallments] = useState("1");
   const [debtDue, setDebtDue] = useState("");
   const [payDebtId, setPayDebtId] = useState<number | null>(null);
   const [payDebtAmount, setPayDebtAmount] = useState("");
@@ -179,13 +186,7 @@ function AppContent() {
       );
       return;
     }
-    if (kind === "expense" && value > available) {
-      Alert.alert(
-        "Saldo insuficiente",
-        "O valor da saída é maior que seu saldo disponível (considerando as caixinhas)."
-      );
-      return;
-    }
+    // Permite saldo negativo — o app serve para visualizar lucro/prejuízo
     await db.runAsync(
       "INSERT INTO transactions (title, amount, kind, category, created_at) VALUES (?, ?, ?, ?, ?)",
       title.trim(),
@@ -267,37 +268,52 @@ function AppContent() {
 
   async function addDebt() {
     const value = parseMoney(debtAmount);
+    const parcels = Math.max(1, Math.floor(Number(String(debtInstallments).replace(",", ".")) || 1));
     if (!debtTitle.trim() || !Number.isFinite(value) || value <= 0) {
       Alert.alert("Confira os dados", "Informe descrição e valor da dívida.");
       return;
     }
-    if (value > available) {
-      Alert.alert(
-        "Saldo insuficiente",
-        "O valor da dívida ultrapassa seu saldo disponível."
-      );
-      return;
-    }
-    await db.withTransactionAsync(async () => {
-      const tx = await db.runAsync(
-        "INSERT INTO transactions (title, amount, kind, category, created_at) VALUES (?, ?, 'expense', 'Dívida', ?)",
-        `Dívida: ${debtTitle.trim()}`,
-        value,
-        new Date().toISOString()
-      );
+    try {
+      // Apenas registra a dívida (não mexe no saldo)
       await db.runAsync(
-        "INSERT INTO debts (title, amount, paid, due_date, transaction_id, created_at) VALUES (?, ?, 0, ?, ?, ?)",
+        "INSERT INTO debts (title, amount, paid, installments, due_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         debtTitle.trim(),
         value,
-        debtDue.trim() || null,
-        tx.lastInsertRowId,
+        0,
+        parcels,
+        debtDue.trim() ? debtDue.trim() : null,
         new Date().toISOString()
       );
-    });
-    setDebtTitle("");
-    setDebtAmount("");
-    setDebtDue("");
-    await refresh();
+      setDebtTitle("");
+      setDebtAmount("");
+      setDebtInstallments("1");
+      setDebtDue("");
+      await refresh();
+      Alert.alert("Pronto", "Dívida registrada com sucesso.");
+    } catch (e: any) {
+      // Fallback caso a coluna installments ainda não exista no banco antigo
+      try {
+        await db.runAsync(
+          "INSERT INTO debts (title, amount, paid, due_date, created_at) VALUES (?, ?, ?, ?, ?)",
+          debtTitle.trim(),
+          value,
+          0,
+          debtDue.trim() ? debtDue.trim() : null,
+          new Date().toISOString()
+        );
+        setDebtTitle("");
+        setDebtAmount("");
+        setDebtInstallments("1");
+        setDebtDue("");
+        await refresh();
+        Alert.alert("Pronto", "Dívida registrada (modo compatibilidade).");
+      } catch (e2: any) {
+        Alert.alert(
+          "Erro ao salvar",
+          "Não foi possível registrar a dívida. Tente fechar e abrir o app novamente."
+        );
+      }
+    }
   }
 
   async function payDebt(debt: Debt) {
@@ -307,6 +323,7 @@ function AppContent() {
       Alert.alert("Valor inválido", `Informe um valor até ${money(remaining)}.`);
       return;
     }
+    // Só atualiza o controle da dívida. O saldo só muda se você lançar uma saída manualmente.
     await db.runAsync(
       "UPDATE debts SET paid = paid + ? WHERE id = ?",
       value,
@@ -320,21 +337,20 @@ function AppContent() {
   async function deleteDebt(debt: Debt) {
     Alert.alert(
       "Excluir dívida?",
-      "A despesa original também será removida do histórico e o saldo será ajustado.",
+      "O registro da dívida será removido. O saldo só muda se existir uma movimentação relacionada na aba Movimentar — exclua ela também se precisar.",
       [
         { text: "Cancelar", style: "cancel" },
         {
           text: "Excluir",
           style: "destructive",
           onPress: async () => {
-            await db.withTransactionAsync(async () => {
-              await db.runAsync(
-                "DELETE FROM transactions WHERE id = ?",
-                debt.transaction_id
-              );
+            try {
               await db.runAsync("DELETE FROM debts WHERE id = ?", debt.id);
-            });
-            await refresh();
+              await refresh();
+              Alert.alert("Removido", "Dívida excluída com sucesso.");
+            } catch (e) {
+              Alert.alert("Erro", "Não foi possível excluir a dívida.");
+            }
           },
         },
       ]
@@ -342,25 +358,26 @@ function AppContent() {
   }
 
   async function deleteTransaction(id: number) {
-    const linked = debts.find((d) => d.transaction_id === id);
-    if (linked) {
-      Alert.alert(
-        "Movimentação vinculada",
-        "Esta despesa está ligada a uma dívida. Exclua a dívida na aba Dívidas para remover os dois registros juntos."
-      );
-      return;
-    }
-    Alert.alert("Excluir movimentação?", "O saldo será recalculado automaticamente.", [
-      { text: "Cancelar", style: "cancel" },
-      {
-        text: "Excluir",
-        style: "destructive",
-        onPress: async () => {
-          await db.runAsync("DELETE FROM transactions WHERE id = ?", id);
-          await refresh();
+    Alert.alert(
+      "Excluir movimentação?",
+      "Esta entrada/saída será apagada e o saldo será recalculado na hora.",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Excluir",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await db.runAsync("DELETE FROM transactions WHERE id = ?", id);
+              await refresh();
+              Alert.alert("Removido", "Movimentação excluída. O saldo foi atualizado.");
+            } catch (e) {
+              Alert.alert("Erro", "Não foi possível excluir a movimentação.");
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   }
 
   return (
@@ -386,7 +403,9 @@ function AppContent() {
           <>
             <View style={styles.balanceCard}>
               <Text style={styles.mutedLight}>SALDO TOTAL</Text>
-              <Text style={styles.balance}>{money(balance)}</Text>
+              <Text style={[styles.balance, balance < 0 && { color: "#F07878" }]}>
+                {money(balance)}
+              </Text>
               <View style={styles.balanceDivider} />
               <View style={styles.balanceRow}>
                 <View>
@@ -400,6 +419,7 @@ function AppContent() {
               </View>
             </View>
 
+            {/* Entradas / Saídas / Resultado — visão estilo planilha */}
             <View style={styles.statRow}>
               <View style={styles.statCard}>
                 <Text style={styles.statLabel}>Entradas</Text>
@@ -408,6 +428,35 @@ function AppContent() {
               <View style={styles.statCard}>
                 <Text style={styles.statLabel}>Saídas</Text>
                 <Text style={styles.expense}>{money(expenses)}</Text>
+              </View>
+            </View>
+            <View style={[styles.statCard, { marginBottom: 14 }]}>
+              <Text style={styles.statLabel}>Resultado (quanto sobrou)</Text>
+              <Text
+                style={[
+                  styles.balanceSmall,
+                  {
+                    color: income - expenses >= 0 ? "#16A875" : "#E16F6F",
+                    fontSize: 22,
+                    marginTop: 4,
+                  },
+                ]}
+              >
+                {money(income - expenses)}
+              </Text>
+              <Text style={[styles.muted, { marginTop: 4 }]}>
+                Mesmo valor negativo aparece aqui para você enxergar o prejuízo
+              </Text>
+            </View>
+
+            <View style={styles.statRow}>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Dívidas em aberto</Text>
+                <Text style={styles.expense}>{money(debtOutstanding)}</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Caixinhas</Text>
+                <Text style={styles.income}>{goals.length}</Text>
               </View>
             </View>
 
@@ -446,17 +495,6 @@ function AppContent() {
                 label="Gráficos"
                 onPress={() => setTab("reports")}
               />
-            </View>
-
-            <View style={styles.statRow}>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Dívidas em aberto</Text>
-                <Text style={styles.expense}>{money(debtOutstanding)}</Text>
-              </View>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Caixinhas</Text>
-                <Text style={styles.income}>{goals.length}</Text>
-              </View>
             </View>
 
             <SectionTitle title="Movimentações recentes" />
@@ -535,17 +573,28 @@ function AppContent() {
             </View>
 
             <SectionTitle title="Histórico" />
+            <Text style={styles.intro}>
+              Para corrigir o saldo, exclua a movimentação indesejada aqui.
+              Itens antigos com nome &quot;Dívida: ...&quot; também podem ser removidos nesta lista.
+            </Text>
             {transactions.length === 0 ? (
               <Empty text="Ainda não há movimentações registradas." />
             ) : (
               transactions.map((t) => (
-                <Pressable
-                  key={t.id}
-                  onLongPress={() => deleteTransaction(t.id)}
-                >
+                <View key={t.id} style={{ marginBottom: 10 }}>
                   <TransactionRow tx={t} />
-                  <Text style={styles.hint}>Toque e segure para excluir</Text>
-                </Pressable>
+                  <Pressable
+                    style={[
+                      styles.secondaryButton,
+                      { marginTop: 6, backgroundColor: "#FCEEEE" },
+                    ]}
+                    onPress={() => deleteTransaction(t.id)}
+                  >
+                    <Text style={[styles.secondaryText, { color: "#C0392B" }]}>
+                      Excluir e atualizar saldo
+                    </Text>
+                  </Pressable>
+                </View>
               ))
             )}
           </>
@@ -667,26 +716,32 @@ function AppContent() {
           <>
             <SectionTitle title="Dívidas e compromissos" />
             <Text style={styles.intro}>
-              Ao registrar uma dívida, o valor integral é lançado como despesa.
-              Pagamentos parciais atualizam o compromisso sem descontar o saldo
-              duas vezes.
+              Registre aqui suas dívidas e parcelas apenas para visualização (como em uma planilha).
+              Nada aqui altera o saldo automaticamente — o saldo só muda com entradas e saídas na aba Movimentar.
             </Text>
             <View style={styles.formCard}>
               <Field
                 label="Descrição"
                 value={debtTitle}
                 onChange={setDebtTitle}
-                placeholder="Ex.: Compra parcelada"
+                placeholder="Ex.: Celular parcelado"
               />
               <Field
                 label="Valor total (R$)"
                 value={debtAmount}
                 onChange={setDebtAmount}
-                placeholder="500,00"
+                placeholder="1200,00"
                 keyboard="decimal-pad"
               />
               <Field
-                label="Vencimento (AAAA-MM-DD, opcional)"
+                label="Número de parcelas"
+                value={debtInstallments}
+                onChange={setDebtInstallments}
+                placeholder="Ex.: 12"
+                keyboard="number-pad"
+              />
+              <Field
+                label="Vencimento da 1ª parcela (AAAA-MM-DD, opcional)"
                 value={debtDue}
                 onChange={setDebtDue}
                 placeholder="2026-12-10"
@@ -707,12 +762,18 @@ function AppContent() {
               debts.map((d) => {
                 const remaining = Math.max(0, d.amount - d.paid);
                 const pct = Math.min(100, (d.paid / d.amount) * 100);
+                const totalParcels = Math.max(1, d.installments || 1);
+                const parcelValue = d.amount / totalParcels;
+                const parcelsPaid = Math.min(
+                  totalParcels,
+                  Math.floor((d.paid + 0.001) / parcelValue)
+                );
                 return (
                   <View key={d.id} style={styles.goalCard}>
                     <View style={styles.goalTop}>
                       <Text style={styles.goalName}>{d.title}</Text>
                       <Text style={styles.goalPct}>
-                        {remaining <= 0 ? "Quitada" : "Em aberto"}
+                        {remaining <= 0 ? "Quitada" : `${parcelsPaid}/${totalParcels}x`}
                       </Text>
                     </View>
                     <Text style={styles.goalSaved}>
@@ -720,6 +781,9 @@ function AppContent() {
                       <Text style={styles.muted}>
                         restantes de {money(d.amount)}
                       </Text>
+                    </Text>
+                    <Text style={[styles.muted, { marginBottom: 8 }]}>
+                      Parcela: {money(parcelValue)} · {totalParcels}x
                     </Text>
                     <View style={styles.progressTrack}>
                       <View
@@ -734,7 +798,7 @@ function AppContent() {
                     </View>
                     <Text style={styles.muted}>
                       Pago: {money(d.paid)}
-                      {d.due_date ? ` · Vence: ${d.due_date}` : ""}
+                      {d.due_date ? ` · 1ª parcela: ${d.due_date}` : ""}
                     </Text>
 
                     {payDebtId === d.id ? (
@@ -743,7 +807,7 @@ function AppContent() {
                           label="Valor do pagamento (R$)"
                           value={payDebtAmount}
                           onChange={setPayDebtAmount}
-                          placeholder="100,00"
+                          placeholder={parcelValue.toFixed(2).replace(".", ",")}
                           keyboard="decimal-pad"
                         />
                         <View style={styles.buttonRow}>
@@ -770,11 +834,14 @@ function AppContent() {
                             style={styles.outlineButton}
                             onPress={() => {
                               setPayDebtId(d.id);
-                              setPayDebtAmount("");
+                              // Já sugere o valor de uma parcela
+                              setPayDebtAmount(
+                                parcelValue.toFixed(2).replace(".", ",")
+                              );
                             }}
                           >
                             <Text style={styles.outlineText}>
-                              Registrar pagamento
+                              Pagar parcela
                             </Text>
                           </Pressable>
                         )}

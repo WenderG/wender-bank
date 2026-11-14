@@ -2,14 +2,22 @@
   "expo": {
     "name": "Wender Bank",
     "slug": "wender-bank",
-    "version": "1.0.0",
+    "version": "1.3.2",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "backgroundColor": "#101C2C"
+    },
     "android": {
-      "package": "com.wenderg.wenderbank"
+      "package": "com.wenderg.wenderbank",
+      "adaptiveIcon": {
+        "backgroundColor": "#101C2C"
+      }
     },
     "ios": {
-      "bundleIdentifier": "com.wenderg.wenderbank"
+      "bundleIdentifier": "com.wenderg.wenderbank",
+      "supportsTablet": false
     },
     "extra": {
       "eas": {

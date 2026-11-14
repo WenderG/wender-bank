@@ -2,64 +2,57 @@
 
 Aplicativo pessoal de controle financeiro criado por **@WenderG**.
 
-Controle saldo, gastos, metas (caixinhas) e dívidas de forma simples, tudo armazenado localmente no aparelho.
+Pense nele como uma **planilha no celular**: você vê quanto entrou, quanto saiu e **quanto sobrou** (mesmo que seja negativo).
 
-## Funcionalidades (v1.0.0)
+---
 
-- **Painel inicial**: saldo total, disponível e reservado; entradas e saídas; dívidas em aberto; atalhos rápidos e últimas movimentações.
-- **Movimentações**: registro de receitas e despesas com categoria; histórico completo; exclusão com confirmação.
-- **Caixinhas**: criação de metas, aportes que reservam valor do saldo disponível, barra de progresso e exclusão (libera o valor reservado).
-- **Dívidas**: registro que lança despesa completa; acompanhamento de pagamentos parciais; exclusão que remove também a despesa original.
-- **Resumo financeiro**: entradas x saídas do mês, despesas por categoria e visão geral de saldos.
-- **Persistência**: SQLite local (dados permanecem após fechar o app).
+## Instalação no celular (APK)
 
-## Stack
+1. Vá em **Releases** deste repositório
+2. Baixe o arquivo `.apk` da versão mais recente
+3. Abra o arquivo no celular e instale
+4. Se o Android pedir, permita “Instalar apps desconhecidos”
 
-- Expo SDK 58 / React Native 0.88 / React 19
-- TypeScript
-- expo-sqlite
+---
 
-## Como executar
+## Funcionalidades
 
-Requer **Node.js 22.13** ou superior.
+- **Painel inicial** — saldo total, entradas, saídas e **resultado** (pode ser negativo)
+- **Movimentações** — lançamento livre de receitas e despesas
+- **Caixinhas** — reserve dinheiro para um objetivo quando você já tem o valor
+- **Dívidas / Parcelas** — só visualização (não altera o saldo sozinho)
+- **Resumo** — gráficos de colunas do mês e por categoria
+- **Dados locais** — tudo salvo no aparelho
+
+---
+
+## Como funciona
+
+| Ação                        | Mexe no saldo?      |
+|----------------------------|---------------------|
+| Lançar Entrada / Saída     | Sim                 |
+| Registrar Dívida / Parcela | Não (só visual)     |
+| Guardar em Caixinha        | Reserva do disponível |
+| Excluir Caixinha           | Libera o reservado  |
+
+O **resultado** (entradas − saídas) aparece em verde quando positivo e em vermelho quando negativo.
+
+---
+
+## Gerar APK
 
 ```bash
-# Clone o repositório (ou baixe o ZIP)
-git clone https://github.com/SEU_USUARIO/wender-bank.git
-cd wender-bank
-
-# Instale as dependências
 npm install
-
-# Inicie o Expo
-npx expo start
-```
-
-Depois escaneie o QR Code com o app **Expo Go** (Android/iOS) ou pressione `a` para emulador Android / `w` para web.
-
-## Gerar APK (opcional)
-
-Com [EAS CLI](https://docs.expo.dev/build/setup/) configurado:
-
-```bash
+eas login
 eas build --platform android --profile preview
 ```
 
-O perfil `preview` gera um APK instalável.
+Se der erro de Git:
 
-## Regras de cálculo
-
-- O **saldo total** é a soma de todas as entradas menos todas as saídas.
-- O **saldo disponível** = saldo total − valor reservado nas caixinhas.
-- Registrar uma **dívida** lança o valor integral como despesa e cria o compromisso em aberto.
-- **Pagamentos parciais** de dívida atualizam apenas o compromisso (não descontam o saldo novamente).
-- **Aportes em caixinhas** movem valor do disponível para o reservado.
-- **Excluir uma caixinha** libera novamente o valor que estava reservado.
-- Excluir uma movimentação vinculada a dívida só é permitido pela aba Dívidas (remove os dois registros juntos).
-
-## Atenção
-
-Versão de uso pessoal. Os dados ficam **somente no aparelho**. Desinstalar o app ou limpar os dados do aplicativo apaga tudo. Para uso definitivo, implemente exportação/backup antes.
+```powershell
+$env:EAS_NO_VCS=1
+eas build --platform android --profile preview
+```
 
 ---
 
