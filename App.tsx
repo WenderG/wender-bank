@@ -9,1004 +9,674 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   View,
 } from "react-native";
 import { SQLiteProvider, useSQLiteContext } from "expo-sqlite";
 
-type Tx = {
+type Entry = {
   id: number;
   title: string;
   amount: number;
-  kind: "income" | "expense";
-  category: string;
+  tag: string;
+  month_key: string;
   created_at: string;
 };
 
-type Goal = {
-  id: number;
-  title: string;
-  target: number;
-  saved: number;
-  created_at: string;
-};
-
-type Debt = {
+type Expense = {
   id: number;
   title: string;
   amount: number;
-  paid: number;
-  installments: number; // total de parcelas
-  due_date: string | null;
+  tag: string;
+  installments: number;
+  start_month: string;
   created_at: string;
 };
 
-type Tab = "home" | "activity" | "goals" | "debts" | "reports";
+type WalletAdj = {
+  id: number;
+  title: string;
+  amount: number;
+  kind: "add" | "remove";
+  month_key: string;
+  created_at: string;
+};
+
+type Tab = "home" | "invoice" | "add" | "analysis";
 
 const money = (n: number) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
-const parseMoney = (s: string) =>
-  Number(s.replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, ""));
+const parseMoney = (s: string) => {
+  const n = Number(
+    String(s).replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, "")
+  );
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const monthKey = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+
+const monthLabel = (key: string) => {
+  const [y, m] = key.split("-").map(Number);
+  const names = [
+    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+  ];
+  return `${names[(m || 1) - 1]} ${y}`;
+};
+
+const addMonths = (key: string, n: number) => {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return monthKey(d);
+};
+
+const monthsBetween = (start: string, end: string) => {
+  const [y1, m1] = start.split("-").map(Number);
+  const [y2, m2] = end.split("-").map(Number);
+  return (y2 - y1) * 12 + (m2 - m1);
+};
 
 async function initialize(db: any) {
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS transactions (
+    CREATE TABLE IF NOT EXISTS entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL,
+      tag TEXT NOT NULL DEFAULT 'Geral',
+      month_key TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL,
+      tag TEXT NOT NULL DEFAULT 'Geral',
+      installments INTEGER NOT NULL DEFAULT 1,
+      start_month TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS wallet (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       amount REAL NOT NULL,
       kind TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'Geral',
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS goals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      target REAL NOT NULL,
-      saved REAL NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS debts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      amount REAL NOT NULL,
-      paid REAL NOT NULL DEFAULT 0,
-      installments INTEGER DEFAULT 1,
-      due_date TEXT,
+      month_key TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
   `);
-  // Garante a coluna installments em bancos antigos
-  try {
-    await db.execAsync(`ALTER TABLE debts ADD COLUMN installments INTEGER DEFAULT 1`);
-  } catch (_) {
-    // já existe
+
+  const cutoff = addMonths(monthKey(), -6);
+  await db.runAsync("DELETE FROM entries WHERE month_key < ?", cutoff);
+  await db.runAsync("DELETE FROM wallet WHERE month_key < ?", cutoff);
+  const allExp = await db.getAllAsync<Expense>("SELECT * FROM expenses");
+  for (const e of allExp) {
+    const last = addMonths(e.start_month, Math.max(0, (e.installments || 1) - 1));
+    if (last < cutoff) {
+      await db.runAsync("DELETE FROM expenses WHERE id = ?", e.id);
+    }
   }
+}
+
+function useTheme() {
+  const scheme = useColorScheme();
+  const dark = scheme === "dark";
+  return {
+    dark,
+    bg: dark ? "#0B1220" : "#F3F6FA",
+    card: dark ? "#152033" : "#FFFFFF",
+    text: dark ? "#E8EEF7" : "#1C2C3E",
+    muted: dark ? "#8B9BB0" : "#758397",
+    border: dark ? "#243247" : "#E7ECF2",
+    header: "#101C2C",
+    accent: "#16A875",
+    danger: "#E16F6F",
+    warn: "#D29A42",
+    inputBg: dark ? "#0F1A2B" : "#F5F7FA",
+    tabBg: dark ? "#0E1726" : "#FFFFFF",
+  };
 }
 
 function AppContent() {
   const db = useSQLiteContext();
+  const t = useTheme();
   const [tab, setTab] = useState<Tab>("home");
-  const [transactions, setTransactions] = useState<Tx[]>([]);
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [debts, setDebts] = useState<Debt[]>([]);
+  const currentMonth = monthKey();
 
-  // Formulários
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
-  const [kind, setKind] = useState<"income" | "expense">("income");
-  const [category, setCategory] = useState("Geral");
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [wallet, setWallet] = useState<WalletAdj[]>([]);
 
-  const [goalTitle, setGoalTitle] = useState("");
-  const [goalTarget, setGoalTarget] = useState("");
-  const [contributeId, setContributeId] = useState<number | null>(null);
-  const [contributeAmount, setContributeAmount] = useState("");
-
-  const [debtTitle, setDebtTitle] = useState("");
-  const [debtAmount, setDebtAmount] = useState("");
-  const [debtInstallments, setDebtInstallments] = useState("1");
-  const [debtDue, setDebtDue] = useState("");
-  const [payDebtId, setPayDebtId] = useState<number | null>(null);
-  const [payDebtAmount, setPayDebtAmount] = useState("");
+  const [fTitle, setFTitle] = useState("");
+  const [fAmount, setFAmount] = useState("");
+  const [fTag, setFTag] = useState("Geral");
+  const [fParcels, setFParcels] = useState("1");
+  const [fKind, setFKind] = useState<"entry" | "expense" | "wallet_add" | "wallet_remove">("entry");
 
   async function refresh() {
-    const tx = await db.getAllAsync<Tx>(
-      "SELECT * FROM transactions ORDER BY id DESC"
-    );
-    const gs = await db.getAllAsync<Goal>("SELECT * FROM goals ORDER BY id DESC");
-    const ds = await db.getAllAsync<Debt>("SELECT * FROM debts ORDER BY id DESC");
-    setTransactions(tx);
-    setGoals(gs);
-    setDebts(ds);
+    setEntries(await db.getAllAsync<Entry>("SELECT * FROM entries ORDER BY id DESC"));
+    setExpenses(await db.getAllAsync<Expense>("SELECT * FROM expenses ORDER BY id DESC"));
+    setWallet(await db.getAllAsync<WalletAdj>("SELECT * FROM wallet ORDER BY id DESC"));
   }
 
   useEffect(() => {
     refresh();
   }, []);
 
-  const balance = useMemo(
+  const carteira = useMemo(() => {
+    return (
+      wallet.reduce((s, w) => s + (w.kind === "add" ? w.amount : -w.amount), 0) +
+      entries.reduce((s, e) => s + e.amount, 0)
+    );
+  }, [wallet, entries]);
+
+  function expenseInMonth(exp: Expense, mk: string) {
+    const parcels = Math.max(1, exp.installments || 1);
+    const idx = monthsBetween(exp.start_month, mk);
+    if (idx < 0 || idx >= parcels) return 0;
+    return exp.amount / parcels;
+  }
+
+  const despesasMes = useMemo(
+    () => expenses.reduce((s, e) => s + expenseInMonth(e, currentMonth), 0),
+    [expenses, currentMonth]
+  );
+
+  const despesasAbertas = useMemo(() => {
+    return expenses.reduce((s, e) => {
+      const parcels = Math.max(1, e.installments || 1);
+      const parcel = e.amount / parcels;
+      let left = 0;
+      for (let i = 0; i < parcels; i++) {
+        const mk = addMonths(e.start_month, i);
+        if (mk >= currentMonth) left += parcel;
+      }
+      return s + left;
+    }, 0);
+  }, [expenses, currentMonth]);
+
+  const saldoAtual = carteira - despesasAbertas;
+
+  const entradasMes = useMemo(
     () =>
-      transactions.reduce(
-        (sum, t) => sum + (t.kind === "income" ? t.amount : -t.amount),
-        0
-      ),
-    [transactions]
-  );
-  const income = useMemo(
-    () =>
-      transactions
-        .filter((t) => t.kind === "income")
-        .reduce((s, t) => s + t.amount, 0),
-    [transactions]
-  );
-  const expenses = useMemo(
-    () =>
-      transactions
-        .filter((t) => t.kind === "expense")
-        .reduce((s, t) => s + t.amount, 0),
-    [transactions]
-  );
-  const reserved = useMemo(
-    () => goals.reduce((s, g) => s + g.saved, 0),
-    [goals]
-  );
-  const available = balance - reserved;
-  const debtOutstanding = useMemo(
-    () => debts.reduce((s, d) => s + Math.max(0, d.amount - d.paid), 0),
-    [debts]
+      entries.filter((e) => e.month_key === currentMonth).reduce((s, e) => s + e.amount, 0) +
+      wallet
+        .filter((w) => w.month_key === currentMonth && w.kind === "add")
+        .reduce((s, w) => s + w.amount, 0),
+    [entries, wallet, currentMonth]
   );
 
-  const monthKey = new Date().toISOString().slice(0, 7);
-  const monthTx = transactions.filter(
-    (t) => t.created_at.slice(0, 7) === monthKey
-  );
-  const monthIn = monthTx
-    .filter((t) => t.kind === "income")
-    .reduce((s, t) => s + t.amount, 0);
-  const monthOut = monthTx
-    .filter((t) => t.kind === "expense")
-    .reduce((s, t) => s + t.amount, 0);
-  const categories = Object.entries(
-    monthTx
-      .filter((t) => t.kind === "expense")
-      .reduce((a, t) => {
-        a[t.category] = (a[t.category] || 0) + t.amount;
-        return a;
-      }, {} as Record<string, number>)
-  ) as Array<[string, number]>;
-  categories.sort((a, b) => b[1] - a[1]);
-  const maxCategory = Math.max(1, ...categories.map((x) => x[1]));
-
-  async function addTransaction() {
-    const value = parseMoney(amount);
-    if (!title.trim() || !Number.isFinite(value) || value <= 0) {
-      Alert.alert(
-        "Confira os dados",
-        "Informe uma descrição e um valor maior que zero."
-      );
-      return;
+  const tagMap = useMemo(() => {
+    const map: Record<string, { in: number; out: number }> = {};
+    for (const e of entries.filter((x) => x.month_key === currentMonth)) {
+      if (!map[e.tag]) map[e.tag] = { in: 0, out: 0 };
+      map[e.tag].in += e.amount;
     }
-    // Permite saldo negativo — o app serve para visualizar lucro/prejuízo
-    await db.runAsync(
-      "INSERT INTO transactions (title, amount, kind, category, created_at) VALUES (?, ?, ?, ?, ?)",
-      title.trim(),
-      value,
-      kind,
-      category.trim() || "Geral",
-      new Date().toISOString()
+    for (const e of expenses) {
+      const v = expenseInMonth(e, currentMonth);
+      if (v <= 0) continue;
+      if (!map[e.tag]) map[e.tag] = { in: 0, out: 0 };
+      map[e.tag].out += v;
+    }
+    return Object.entries(map).sort(
+      (a, b) => b[1].out + b[1].in - (a[1].out + a[1].in)
     );
-    setTitle("");
-    setAmount("");
-    setCategory("Geral");
-    await refresh();
-    setTab("activity");
-  }
+  }, [entries, expenses, currentMonth]);
 
-  async function addGoal() {
-    const value = parseMoney(goalTarget);
-    if (!goalTitle.trim() || !Number.isFinite(value) || value <= 0) {
-      Alert.alert(
-        "Confira os dados",
-        "Informe o nome do objetivo e o valor desejado."
-      );
+  const maxTag = Math.max(1, ...tagMap.map(([, v]) => Math.max(v.in, v.out)));
+
+  async function save() {
+    const value = parseMoney(fAmount);
+    if (!fTitle.trim() || !Number.isFinite(value) || value <= 0) {
+      Alert.alert("Dados inválidos", "Informe nome e um valor positivo.");
       return;
     }
-    await db.runAsync(
-      "INSERT INTO goals (title, target, saved, created_at) VALUES (?, ?, 0, ?)",
-      goalTitle.trim(),
-      value,
-      new Date().toISOString()
-    );
-    setGoalTitle("");
-    setGoalTarget("");
-    await refresh();
-  }
 
-  async function contribute() {
-    const value = parseMoney(contributeAmount);
-    const goal = goals.find((g) => g.id === contributeId);
-    if (!goal || !Number.isFinite(value) || value <= 0) {
-      Alert.alert("Confira o valor", "Informe quanto deseja guardar.");
-      return;
-    }
-    if (value > available) {
-      Alert.alert(
-        "Saldo insuficiente",
-        "Você não tem esse valor disponível para reservar."
-      );
-      return;
-    }
-    await db.runAsync(
-      "UPDATE goals SET saved = saved + ? WHERE id = ?",
-      value,
-      goal.id
-    );
-    setContributeId(null);
-    setContributeAmount("");
-    await refresh();
-  }
-
-  async function deleteGoal(goal: Goal) {
-    Alert.alert(
-      "Excluir caixinha?",
-      goal.saved > 0
-        ? `O valor reservado de ${money(goal.saved)} voltará para o saldo disponível.`
-        : "A caixinha será removida.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Excluir",
-          style: "destructive",
-          onPress: async () => {
-            await db.runAsync("DELETE FROM goals WHERE id = ?", goal.id);
-            await refresh();
-          },
-        },
-      ]
-    );
-  }
-
-  async function addDebt() {
-    const value = parseMoney(debtAmount);
-    const parcels = Math.max(1, Math.floor(Number(String(debtInstallments).replace(",", ".")) || 1));
-    if (!debtTitle.trim() || !Number.isFinite(value) || value <= 0) {
-      Alert.alert("Confira os dados", "Informe descrição e valor da dívida.");
-      return;
-    }
     try {
-      // Apenas registra a dívida (não mexe no saldo)
-      await db.runAsync(
-        "INSERT INTO debts (title, amount, paid, installments, due_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        debtTitle.trim(),
-        value,
-        0,
-        parcels,
-        debtDue.trim() ? debtDue.trim() : null,
-        new Date().toISOString()
-      );
-      setDebtTitle("");
-      setDebtAmount("");
-      setDebtInstallments("1");
-      setDebtDue("");
-      await refresh();
-      Alert.alert("Pronto", "Dívida registrada com sucesso.");
-    } catch (e: any) {
-      // Fallback caso a coluna installments ainda não exista no banco antigo
-      try {
+      if (fKind === "entry") {
         await db.runAsync(
-          "INSERT INTO debts (title, amount, paid, due_date, created_at) VALUES (?, ?, ?, ?, ?)",
-          debtTitle.trim(),
+          "INSERT INTO entries (title, amount, tag, month_key, created_at) VALUES (?, ?, ?, ?, ?)",
+          fTitle.trim(),
           value,
-          0,
-          debtDue.trim() ? debtDue.trim() : null,
+          fTag.trim() || "Geral",
+          currentMonth,
           new Date().toISOString()
         );
-        setDebtTitle("");
-        setDebtAmount("");
-        setDebtInstallments("1");
-        setDebtDue("");
-        await refresh();
-        Alert.alert("Pronto", "Dívida registrada (modo compatibilidade).");
-      } catch (e2: any) {
-        Alert.alert(
-          "Erro ao salvar",
-          "Não foi possível registrar a dívida. Tente fechar e abrir o app novamente."
+      } else if (fKind === "expense") {
+        const parcels = Math.max(1, Math.floor(Number(fParcels) || 1));
+        await db.runAsync(
+          "INSERT INTO expenses (title, amount, tag, installments, start_month, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          fTitle.trim(),
+          value,
+          fTag.trim() || "Geral",
+          parcels,
+          currentMonth,
+          new Date().toISOString()
+        );
+      } else if (fKind === "wallet_add") {
+        await db.runAsync(
+          "INSERT INTO wallet (title, amount, kind, month_key, created_at) VALUES (?, ?, 'add', ?, ?)",
+          fTitle.trim(),
+          value,
+          currentMonth,
+          new Date().toISOString()
+        );
+      } else if (fKind === "wallet_remove") {
+        if (value > carteira) {
+          Alert.alert("Carteira", "A carteira não pode ficar negativa.");
+          return;
+        }
+        await db.runAsync(
+          "INSERT INTO wallet (title, amount, kind, month_key, created_at) VALUES (?, ?, 'remove', ?, ?)",
+          fTitle.trim(),
+          value,
+          currentMonth,
+          new Date().toISOString()
         );
       }
+
+      setFTitle("");
+      setFAmount("");
+      setFTag("Geral");
+      setFParcels("1");
+      await refresh();
+      setTab(fKind === "expense" ? "invoice" : "home");
+    } catch {
+      Alert.alert("Erro", "Não foi possível salvar.");
     }
   }
 
-  async function payDebt(debt: Debt) {
-    const value = parseMoney(payDebtAmount);
-    const remaining = debt.amount - debt.paid;
-    if (!Number.isFinite(value) || value <= 0 || value > remaining) {
-      Alert.alert("Valor inválido", `Informe um valor até ${money(remaining)}.`);
-      return;
-    }
-    // Só atualiza o controle da dívida. O saldo só muda se você lançar uma saída manualmente.
-    await db.runAsync(
-      "UPDATE debts SET paid = paid + ? WHERE id = ?",
-      value,
-      debt.id
-    );
-    setPayDebtId(null);
-    setPayDebtAmount("");
-    await refresh();
+  function confirmDelete(title: string, action: () => Promise<void>) {
+    Alert.alert("Excluir?", title, [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Excluir",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await action();
+            await refresh();
+          } catch {
+            Alert.alert("Erro", "Falha ao excluir.");
+          }
+        },
+      },
+    ]);
   }
 
-  async function deleteDebt(debt: Debt) {
-    Alert.alert(
-      "Excluir dívida?",
-      "O registro da dívida será removido. O saldo só muda se existir uma movimentação relacionada na aba Movimentar — exclua ela também se precisar.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Excluir",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await db.runAsync("DELETE FROM debts WHERE id = ?", debt.id);
-              await refresh();
-              Alert.alert("Removido", "Dívida excluída com sucesso.");
-            } catch (e) {
-              Alert.alert("Erro", "Não foi possível excluir a dívida.");
-            }
-          },
-        },
-      ]
-    );
-  }
-
-  async function deleteTransaction(id: number) {
-    Alert.alert(
-      "Excluir movimentação?",
-      "Esta entrada/saída será apagada e o saldo será recalculado na hora.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Excluir",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await db.runAsync("DELETE FROM transactions WHERE id = ?", id);
-              await refresh();
-              Alert.alert("Removido", "Movimentação excluída. O saldo foi atualizado.");
-            } catch (e) {
-              Alert.alert("Erro", "Não foi possível excluir a movimentação.");
-            }
-          },
-        },
-      ]
-    );
-  }
+  const s = makeStyles(t);
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="light-content" backgroundColor="#101C2C" />
-      <View style={styles.header}>
+    <SafeAreaView style={s.safe}>
+      <StatusBar barStyle="light-content" backgroundColor={t.header} translucent={false} />
+      <View style={s.header}>
         <View>
-          <Text style={styles.brand}>
-            WENDER <Text style={styles.brandAccent}>BANK</Text>
+          <Text style={s.brand}>
+            WENDER <Text style={{ color: "#41D6A0" }}>BANK</Text>
           </Text>
-          <Text style={styles.headerSub}>Seu dinheiro, sob seu controle.</Text>
+          <Text style={s.headerSub}>{monthLabel(currentMonth)}</Text>
         </View>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>W</Text>
+        <View style={s.avatar}>
+          <Text style={s.avatarText}>W</Text>
         </View>
       </View>
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-      >
+      <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
         {tab === "home" && (
           <>
-            <View style={styles.balanceCard}>
-              <Text style={styles.mutedLight}>SALDO TOTAL</Text>
-              <Text style={[styles.balance, balance < 0 && { color: "#F07878" }]}>
-                {money(balance)}
+            <View style={s.balanceCard}>
+              <Text style={s.mutedLight}>SALDO ATUAL</Text>
+              <Text style={[s.balance, saldoAtual < 0 && { color: "#F07878" }]}>
+                {money(saldoAtual)}
               </Text>
-              <View style={styles.balanceDivider} />
-              <View style={styles.balanceRow}>
+              <Text style={s.formula}>carteira − despesas em aberto</Text>
+              <View style={s.balanceDivider} />
+              <View style={s.balanceRow}>
                 <View>
-                  <Text style={styles.mutedLight}>Disponível</Text>
-                  <Text style={styles.balanceSmall}>{money(available)}</Text>
+                  <Text style={s.mutedLight}>CARTEIRA</Text>
+                  <Text style={s.balanceSmall}>{money(carteira)}</Text>
                 </View>
                 <View>
-                  <Text style={styles.mutedLight}>Reservado</Text>
-                  <Text style={styles.balanceSmall}>{money(reserved)}</Text>
+                  <Text style={s.mutedLight}>DESPESAS ABERTAS</Text>
+                  <Text style={[s.balanceSmall, { color: "#F07878" }]}>
+                    {money(despesasAbertas)}
+                  </Text>
                 </View>
               </View>
             </View>
 
-            {/* Entradas / Saídas / Resultado — visão estilo planilha */}
-            <View style={styles.statRow}>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Entradas</Text>
-                <Text style={styles.income}>{money(income)}</Text>
+            <View style={s.statRow}>
+              <View style={s.statCard}>
+                <Text style={s.statLabel}>Entradas do mês</Text>
+                <Text style={s.income}>{money(entradasMes)}</Text>
               </View>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Saídas</Text>
-                <Text style={styles.expense}>{money(expenses)}</Text>
-              </View>
-            </View>
-            <View style={[styles.statCard, { marginBottom: 14 }]}>
-              <Text style={styles.statLabel}>Resultado (quanto sobrou)</Text>
-              <Text
-                style={[
-                  styles.balanceSmall,
-                  {
-                    color: income - expenses >= 0 ? "#16A875" : "#E16F6F",
-                    fontSize: 22,
-                    marginTop: 4,
-                  },
-                ]}
-              >
-                {money(income - expenses)}
-              </Text>
-              <Text style={[styles.muted, { marginTop: 4 }]}>
-                Mesmo valor negativo aparece aqui para você enxergar o prejuízo
-              </Text>
-            </View>
-
-            <View style={styles.statRow}>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Dívidas em aberto</Text>
-                <Text style={styles.expense}>{money(debtOutstanding)}</Text>
-              </View>
-              <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Caixinhas</Text>
-                <Text style={styles.income}>{goals.length}</Text>
+              <View style={s.statCard}>
+                <Text style={s.statLabel}>Despesas do mês</Text>
+                <Text style={s.expense}>{money(despesasMes)}</Text>
               </View>
             </View>
 
-            <SectionTitle title="Acesso rápido" />
-            <View style={styles.quickRow}>
-              <QuickAction
-                icon="＋"
-                label="Receber"
-                onPress={() => {
-                  setKind("income");
-                  setTab("activity");
-                }}
-              />
-              <QuickAction
-                icon="−"
-                label="Gastar"
-                onPress={() => {
-                  setKind("expense");
-                  setTab("activity");
-                }}
-              />
-              <QuickAction
-                icon="◎"
-                label="Caixinhas"
-                onPress={() => setTab("goals")}
-              />
+            <Text style={s.section}>Atalhos</Text>
+            <View style={s.quickRow}>
+              <Quick label="Entrada" onPress={() => { setFKind("entry"); setTab("add"); }} t={t} />
+              <Quick label="Despesa" onPress={() => { setFKind("expense"); setTab("add"); }} t={t} />
+              <Quick label="Fatura" onPress={() => setTab("invoice")} t={t} />
+              <Quick label="Análise" onPress={() => setTab("analysis")} t={t} />
             </View>
-            <View style={styles.quickRow}>
-              <QuickAction
-                icon="▤"
-                label="Dívidas"
-                onPress={() => setTab("debts")}
-              />
-              <QuickAction
-                icon="▥"
-                label="Gráficos"
-                onPress={() => setTab("reports")}
-              />
+          </>
+        )}
+
+        {tab === "invoice" && (
+          <>
+            <Text style={s.section}>Fatura · {monthLabel(currentMonth)}</Text>
+            <View style={s.statCard}>
+              <View style={s.rowBetween}>
+                <Text style={s.muted}>Saldo atual</Text>
+                <Text style={{ color: saldoAtual < 0 ? t.danger : t.accent, fontWeight: "800" }}>
+                  {money(saldoAtual)}
+                </Text>
+              </View>
             </View>
 
-            <SectionTitle title="Movimentações recentes" />
-            {transactions.length === 0 ? (
-              <Empty text="Suas movimentações aparecerão aqui." />
+            <Text style={s.section}>Entradas</Text>
+            {entries.filter((e) => e.month_key === currentMonth).length === 0 &&
+            wallet.filter((w) => w.month_key === currentMonth && w.kind === "add").length === 0 ? (
+              <Empty text="Nenhuma entrada neste mês." t={t} />
             ) : (
-              transactions
-                .slice(0, 5)
-                .map((t) => <TransactionRow key={t.id} tx={t} />)
+              <>
+                {entries
+                  .filter((e) => e.month_key === currentMonth)
+                  .map((e) => (
+                    <Row
+                      key={"e-" + e.id}
+                      title={e.title}
+                      meta={e.tag}
+                      value={money(e.amount)}
+                      positive
+                      t={t}
+                      onDelete={() =>
+                        confirmDelete(e.title, async () => {
+                          await db.runAsync("DELETE FROM entries WHERE id = ?", e.id);
+                        })
+                      }
+                    />
+                  ))}
+                {wallet
+                  .filter((w) => w.month_key === currentMonth && w.kind === "add")
+                  .map((w) => (
+                    <Row
+                      key={"w-" + w.id}
+                      title={w.title}
+                      meta="Carteira +"
+                      value={money(w.amount)}
+                      positive
+                      t={t}
+                      onDelete={() =>
+                        confirmDelete(w.title, async () => {
+                          await db.runAsync("DELETE FROM wallet WHERE id = ?", w.id);
+                        })
+                      }
+                    />
+                  ))}
+              </>
+            )}
+
+            <Text style={s.section}>Despesas</Text>
+            {expenses.filter((e) => expenseInMonth(e, currentMonth) > 0).length === 0 ? (
+              <Empty text="Nenhuma despesa neste mês." t={t} />
+            ) : (
+              expenses
+                .filter((e) => expenseInMonth(e, currentMonth) > 0)
+                .map((e) => {
+                  const v = expenseInMonth(e, currentMonth);
+                  const parcels = Math.max(1, e.installments || 1);
+                  const idx = monthsBetween(e.start_month, currentMonth) + 1;
+                  return (
+                    <Row
+                      key={"x-" + e.id}
+                      title={e.title}
+                      meta={
+                        parcels > 1
+                          ? e.tag + " · " + idx + "/" + parcels + "x de " + money(e.amount / parcels)
+                          : e.tag
+                      }
+                      value={money(v)}
+                      positive={false}
+                      t={t}
+                      onDelete={() =>
+                        confirmDelete(e.title, async () => {
+                          await db.runAsync("DELETE FROM expenses WHERE id = ?", e.id);
+                        })
+                      }
+                    />
+                  );
+                })
+            )}
+
+            {wallet.filter((w) => w.month_key === currentMonth && w.kind === "remove").length > 0 && (
+              <>
+                <Text style={s.section}>Saídas da carteira</Text>
+                {wallet
+                  .filter((w) => w.month_key === currentMonth && w.kind === "remove")
+                  .map((w) => (
+                    <Row
+                      key={"wr-" + w.id}
+                      title={w.title}
+                      meta="Carteira −"
+                      value={money(w.amount)}
+                      positive={false}
+                      t={t}
+                      onDelete={() =>
+                        confirmDelete(w.title, async () => {
+                          await db.runAsync("DELETE FROM wallet WHERE id = ?", w.id);
+                        })
+                      }
+                    />
+                  ))}
+              </>
             )}
           </>
         )}
 
-        {tab === "activity" && (
+        {tab === "add" && (
           <>
-            <SectionTitle title="Nova movimentação" />
-            <View style={styles.formCard}>
-              <View style={styles.segment}>
-                <Pressable
-                  onPress={() => setKind("income")}
-                  style={[
-                    styles.segmentButton,
-                    kind === "income" && styles.segmentActive,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      kind === "income" && styles.segmentTextActive,
-                    ]}
-                  >
-                    Entrada
-                  </Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => setKind("expense")}
-                  style={[
-                    styles.segmentButton,
-                    kind === "expense" && styles.segmentActive,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      kind === "expense" && styles.segmentTextActive,
-                    ]}
-                  >
-                    Saída
-                  </Text>
-                </Pressable>
-              </View>
-              <Field
-                label="Descrição"
-                value={title}
-                onChange={setTitle}
-                placeholder="Ex.: Pagamento de evento"
-              />
-              <Field
-                label="Valor (R$)"
-                value={amount}
-                onChange={setAmount}
-                placeholder="Ex.: 150,00"
-                keyboard="decimal-pad"
-              />
-              <Field
-                label="Categoria"
-                value={category}
-                onChange={setCategory}
-                placeholder="Ex.: Trabalho, alimentação..."
-              />
-              <Pressable style={styles.primaryButton} onPress={addTransaction}>
-                <Text style={styles.primaryButtonText}>
-                  Salvar movimentação
-                </Text>
-              </Pressable>
-            </View>
-
-            <SectionTitle title="Histórico" />
-            <Text style={styles.intro}>
-              Para corrigir o saldo, exclua a movimentação indesejada aqui.
-              Itens antigos com nome &quot;Dívida: ...&quot; também podem ser removidos nesta lista.
-            </Text>
-            {transactions.length === 0 ? (
-              <Empty text="Ainda não há movimentações registradas." />
-            ) : (
-              transactions.map((t) => (
-                <View key={t.id} style={{ marginBottom: 10 }}>
-                  <TransactionRow tx={t} />
+            <Text style={s.section}>Novo lançamento</Text>
+            <View style={s.formCard}>
+              <View style={s.segment}>
+                {([
+                  ["entry", "Entrada"],
+                  ["expense", "Despesa"],
+                  ["wallet_add", "Carteira +"],
+                  ["wallet_remove", "Carteira −"],
+                ] as const).map(([k, label]) => (
                   <Pressable
-                    style={[
-                      styles.secondaryButton,
-                      { marginTop: 6, backgroundColor: "#FCEEEE" },
-                    ]}
-                    onPress={() => deleteTransaction(t.id)}
+                    key={k}
+                    onPress={() => setFKind(k)}
+                    style={[s.segmentBtn, fKind === k && s.segmentActive]}
                   >
-                    <Text style={[styles.secondaryText, { color: "#C0392B" }]}>
-                      Excluir e atualizar saldo
+                    <Text style={[s.segmentText, fKind === k && s.segmentTextActive]}>
+                      {label}
                     </Text>
                   </Pressable>
-                </View>
-              ))
-            )}
-          </>
-        )}
+                ))}
+              </View>
 
-        {tab === "goals" && (
-          <>
-            <SectionTitle title="Minhas caixinhas" />
-            <Text style={styles.intro}>
-              Separe dinheiro para seus próximos objetivos. O valor reservado
-              deixa de fazer parte do saldo disponível.
-            </Text>
-            <View style={styles.formCard}>
+              <Field label="Nome" value={fTitle} onChange={setFTitle} placeholder="Ex.: Salário" t={t} />
               <Field
-                label="Nome do objetivo"
-                value={goalTitle}
-                onChange={setGoalTitle}
-                placeholder="Ex.: Novo notebook"
-              />
-              <Field
-                label="Quanto custa? (R$)"
-                value={goalTarget}
-                onChange={setGoalTarget}
-                placeholder="Ex.: 3000,00"
+                label="Valor (R$)"
+                value={fAmount}
+                onChange={setFAmount}
+                placeholder="0,00"
                 keyboard="decimal-pad"
+                t={t}
               />
-              <Pressable style={styles.primaryButton} onPress={addGoal}>
-                <Text style={styles.primaryButtonText}>Criar caixinha</Text>
+              {(fKind === "entry" || fKind === "expense") && (
+                <Field
+                  label="Tag"
+                  value={fTag}
+                  onChange={setFTag}
+                  placeholder="Ex.: Moradia"
+                  t={t}
+                />
+              )}
+              {fKind === "expense" && (
+                <Field
+                  label="Parcelas"
+                  value={fParcels}
+                  onChange={setFParcels}
+                  placeholder="1"
+                  keyboard="number-pad"
+                  t={t}
+                />
+              )}
+              <Pressable style={s.primaryBtn} onPress={save}>
+                <Text style={s.primaryBtnText}>Salvar</Text>
               </Pressable>
             </View>
-
-            {goals.length === 0 ? (
-              <Empty text="Crie uma caixinha para começar a guardar dinheiro." />
-            ) : (
-              goals.map((g) => {
-                const pct = Math.min(100, (g.saved / g.target) * 100);
-                const completed = g.saved >= g.target;
-                return (
-                  <View key={g.id} style={styles.goalCard}>
-                    <View style={styles.goalTop}>
-                      <Text style={styles.goalName}>{g.title}</Text>
-                      <Text
-                        style={[
-                          styles.goalPct,
-                          completed && { color: "#16A875" },
-                        ]}
-                      >
-                        {completed ? "Meta atingida" : `${pct.toFixed(0)}%`}
-                      </Text>
-                    </View>
-                    <Text style={styles.goalSaved}>
-                      {money(g.saved)}{" "}
-                      <Text style={styles.muted}>de {money(g.target)}</Text>
-                    </Text>
-                    <View style={styles.progressTrack}>
-                      <View
-                        style={[styles.progressFill, { width: `${pct}%` }]}
-                      />
-                    </View>
-                    <Text style={styles.muted}>
-                      Faltam {money(Math.max(0, g.target - g.saved))}
-                    </Text>
-
-                    {contributeId === g.id ? (
-                      <View style={styles.contributeBox}>
-                        <Field
-                          label="Valor para guardar (R$)"
-                          value={contributeAmount}
-                          onChange={setContributeAmount}
-                          placeholder="Ex.: 100,00"
-                          keyboard="decimal-pad"
-                        />
-                        <View style={styles.buttonRow}>
-                          <Pressable
-                            style={styles.secondaryButton}
-                            onPress={() => setContributeId(null)}
-                          >
-                            <Text style={styles.secondaryText}>Cancelar</Text>
-                          </Pressable>
-                          <Pressable
-                            style={styles.primaryButtonFlex}
-                            onPress={contribute}
-                          >
-                            <Text style={styles.primaryButtonText}>
-                              Guardar
-                            </Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                    ) : (
-                      <View style={styles.buttonRow}>
-                        <Pressable
-                          style={styles.outlineButton}
-                          onPress={() => {
-                            setContributeId(g.id);
-                            setContributeAmount("");
-                          }}
-                        >
-                          <Text style={styles.outlineText}>
-                            ＋ Adicionar dinheiro
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={styles.secondaryButton}
-                          onPress={() => deleteGoal(g)}
-                        >
-                          <Text style={styles.secondaryText}>Excluir</Text>
-                        </Pressable>
-                      </View>
-                    )}
-                  </View>
-                );
-              })
-            )}
           </>
         )}
 
-        {tab === "debts" && (
+        {tab === "analysis" && (
           <>
-            <SectionTitle title="Dívidas e compromissos" />
-            <Text style={styles.intro}>
-              Registre aqui suas dívidas e parcelas apenas para visualização (como em uma planilha).
-              Nada aqui altera o saldo automaticamente — o saldo só muda com entradas e saídas na aba Movimentar.
-            </Text>
-            <View style={styles.formCard}>
-              <Field
-                label="Descrição"
-                value={debtTitle}
-                onChange={setDebtTitle}
-                placeholder="Ex.: Celular parcelado"
-              />
-              <Field
-                label="Valor total (R$)"
-                value={debtAmount}
-                onChange={setDebtAmount}
-                placeholder="1200,00"
-                keyboard="decimal-pad"
-              />
-              <Field
-                label="Número de parcelas"
-                value={debtInstallments}
-                onChange={setDebtInstallments}
-                placeholder="Ex.: 12"
-                keyboard="number-pad"
-              />
-              <Field
-                label="Vencimento da 1ª parcela (AAAA-MM-DD, opcional)"
-                value={debtDue}
-                onChange={setDebtDue}
-                placeholder="2026-12-10"
-              />
-              <Pressable style={styles.primaryButton} onPress={addDebt}>
-                <Text style={styles.primaryButtonText}>Registrar dívida</Text>
-              </Pressable>
-            </View>
+            <Text style={s.section}>Análise · {monthLabel(currentMonth)}</Text>
 
-            <View style={styles.debtSummary}>
-              <Text style={styles.mutedLight}>TOTAL EM ABERTO</Text>
-              <Text style={styles.debtTotal}>{money(debtOutstanding)}</Text>
-            </View>
-
-            {debts.length === 0 ? (
-              <Empty text="Nenhuma dívida cadastrada." />
-            ) : (
-              debts.map((d) => {
-                const remaining = Math.max(0, d.amount - d.paid);
-                const pct = Math.min(100, (d.paid / d.amount) * 100);
-                const totalParcels = Math.max(1, d.installments || 1);
-                const parcelValue = d.amount / totalParcels;
-                const parcelsPaid = Math.min(
-                  totalParcels,
-                  Math.floor((d.paid + 0.001) / parcelValue)
-                );
-                return (
-                  <View key={d.id} style={styles.goalCard}>
-                    <View style={styles.goalTop}>
-                      <Text style={styles.goalName}>{d.title}</Text>
-                      <Text style={styles.goalPct}>
-                        {remaining <= 0 ? "Quitada" : `${parcelsPaid}/${totalParcels}x`}
-                      </Text>
-                    </View>
-                    <Text style={styles.goalSaved}>
-                      {money(remaining)}{" "}
-                      <Text style={styles.muted}>
-                        restantes de {money(d.amount)}
-                      </Text>
-                    </Text>
-                    <Text style={[styles.muted, { marginBottom: 8 }]}>
-                      Parcela: {money(parcelValue)} · {totalParcels}x
-                    </Text>
-                    <View style={styles.progressTrack}>
-                      <View
-                        style={[
-                          styles.progressFill,
-                          {
-                            width: `${pct}%`,
-                            backgroundColor: "#D29A42",
-                          },
-                        ]}
-                      />
-                    </View>
-                    <Text style={styles.muted}>
-                      Pago: {money(d.paid)}
-                      {d.due_date ? ` · 1ª parcela: ${d.due_date}` : ""}
-                    </Text>
-
-                    {payDebtId === d.id ? (
-                      <View style={styles.contributeBox}>
-                        <Field
-                          label="Valor do pagamento (R$)"
-                          value={payDebtAmount}
-                          onChange={setPayDebtAmount}
-                          placeholder={parcelValue.toFixed(2).replace(".", ",")}
-                          keyboard="decimal-pad"
-                        />
-                        <View style={styles.buttonRow}>
-                          <Pressable
-                            style={styles.secondaryButton}
-                            onPress={() => setPayDebtId(null)}
-                          >
-                            <Text style={styles.secondaryText}>Cancelar</Text>
-                          </Pressable>
-                          <Pressable
-                            style={styles.primaryButtonFlex}
-                            onPress={() => payDebt(d)}
-                          >
-                            <Text style={styles.primaryButtonText}>
-                              Registrar pagamento
-                            </Text>
-                          </Pressable>
-                        </View>
+            {/* Colunas Entradas x Despesas */}
+            <View style={s.statCard}>
+              <Text style={[s.statLabel, { marginBottom: 16 }]}>Entradas x Despesas</Text>
+              <View style={{ flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 160, marginBottom: 8 }}>
+                {(() => {
+                  const maxV = Math.max(1, entradasMes, despesasMes);
+                  const hIn = Math.max(8, (entradasMes / maxV) * 140);
+                  const hOut = Math.max(8, (despesasMes / maxV) * 140);
+                  return (
+                    <>
+                      <View style={{ alignItems: "center", flex: 1 }}>
+                        <Text style={{ color: t.accent, fontSize: 11, fontWeight: "700", marginBottom: 6 }}>
+                          {money(entradasMes)}
+                        </Text>
+                        <View style={{ width: 48, height: hIn, backgroundColor: t.accent, borderTopLeftRadius: 8, borderTopRightRadius: 8 }} />
+                        <Text style={{ color: t.muted, fontSize: 11, marginTop: 8, fontWeight: "700" }}>Entradas</Text>
                       </View>
-                    ) : (
-                      <View style={styles.buttonRow}>
-                        {remaining > 0 && (
-                          <Pressable
-                            style={styles.outlineButton}
-                            onPress={() => {
-                              setPayDebtId(d.id);
-                              // Já sugere o valor de uma parcela
-                              setPayDebtAmount(
-                                parcelValue.toFixed(2).replace(".", ",")
-                              );
-                            }}
-                          >
-                            <Text style={styles.outlineText}>
-                              Pagar parcela
-                            </Text>
-                          </Pressable>
-                        )}
-                        <Pressable
-                          style={styles.secondaryButton}
-                          onPress={() => deleteDebt(d)}
-                        >
-                          <Text style={styles.secondaryText}>Excluir</Text>
-                        </Pressable>
+                      <View style={{ alignItems: "center", flex: 1 }}>
+                        <Text style={{ color: t.danger, fontSize: 11, fontWeight: "700", marginBottom: 6 }}>
+                          {money(despesasMes)}
+                        </Text>
+                        <View style={{ width: 48, height: hOut, backgroundColor: t.danger, borderTopLeftRadius: 8, borderTopRightRadius: 8 }} />
+                        <Text style={{ color: t.muted, fontSize: 11, marginTop: 8, fontWeight: "700" }}>Despesas</Text>
                       </View>
-                    )}
-                  </View>
-                );
-              })
-            )}
-          </>
-        )}
-
-        {tab === "reports" && (
-          <>
-            <SectionTitle title="Resumo financeiro" />
-            <Text style={styles.intro}>
-              Entradas e saídas registradas neste mês ({monthKey}).
-            </Text>
-
-            <View style={styles.goalCard}>
-              <Text style={styles.goalName}>Entradas x saídas · mês atual</Text>
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Entradas</Text>
-                <Text style={styles.income}>{money(monthIn)}</Text>
+                    </>
+                  );
+                })()}
               </View>
-              <View style={styles.reportTrack}>
-                <View
-                  style={[
-                    styles.reportIncome,
-                    {
-                      width: `${Math.max(
-                        2,
-                        (monthIn / Math.max(1, monthIn, monthOut)) * 100
-                      )}%`,
-                    },
-                  ]}
-                />
-              </View>
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Saídas</Text>
-                <Text style={styles.expense}>{money(monthOut)}</Text>
-              </View>
-              <View style={styles.reportTrack}>
-                <View
-                  style={[
-                    styles.reportExpense,
-                    {
-                      width: `${Math.max(
-                        2,
-                        (monthOut / Math.max(1, monthIn, monthOut)) * 100
-                      )}%`,
-                    },
-                  ]}
-                />
-              </View>
-              <View style={styles.balanceDividerLight} />
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Resultado do mês</Text>
+              <View style={s.divider} />
+              <View style={s.rowBetween}>
+                <Text style={s.muted}>Resultado do mês</Text>
                 <Text
-                  style={
-                    monthIn - monthOut >= 0 ? styles.income : styles.expense
-                  }
+                  style={{
+                    fontWeight: "800",
+                    color: entradasMes - despesasMes >= 0 ? t.accent : t.danger,
+                  }}
                 >
-                  {money(monthIn - monthOut)}
+                  {money(entradasMes - despesasMes)}
                 </Text>
               </View>
             </View>
 
-            <View style={styles.goalCard}>
-              <Text style={styles.goalName}>Despesas por categoria</Text>
-              {categories.length === 0 ? (
-                <Empty text="Ainda não há despesas neste mês." />
+            {/* Linha de despesas por categoria */}
+            <Text style={s.section}>Despesas por categoria (linha)</Text>
+            {tagMap.filter(([, v]) => v.out > 0).length === 0 ? (
+              <Empty text="Sem despesas este mês." t={t} />
+            ) : (
+              <View style={s.statCard}>
+                <LineChart
+                  items={tagMap.filter(([, v]) => v.out > 0).map(([tag, v]) => ({ label: tag, value: v.out }))}
+                  color={t.danger}
+                  t={t}
+                />
+              </View>
+            )}
+
+            {/* Pizzas */}
+            <Text style={s.section}>Divisão por categorias</Text>
+            <View style={s.statCard}>
+              <Text style={[s.statLabel, { marginBottom: 10 }]}>Entradas</Text>
+              {tagMap.filter(([, v]) => v.in > 0).length === 0 ? (
+                <Text style={{ color: t.muted, marginBottom: 8 }}>Sem entradas neste mês.</Text>
               ) : (
-                categories.map(([name, value]) => (
-                  <View key={name} style={{ marginTop: 12 }}>
-                    <View style={styles.reportLine}>
-                      <Text style={styles.muted}>{name}</Text>
-                      <Text style={styles.txAmount}>{money(value)}</Text>
-                    </View>
-                    <View style={styles.reportTrack}>
-                      <View
-                        style={[
-                          styles.reportExpense,
-                          { width: `${(value / maxCategory) * 100}%` },
-                        ]}
-                      />
-                    </View>
-                  </View>
-                ))
+                <PieChart
+                  items={tagMap.filter(([, v]) => v.in > 0).map(([tag, v]) => ({ label: tag, value: v.in }))}
+                  t={t}
+                />
               )}
             </View>
-
-            <View style={styles.goalCard}>
-              <Text style={styles.goalName}>Visão geral</Text>
-              <Text style={styles.reportBalance}>{money(balance)}</Text>
-              <Text style={styles.muted}>Saldo total registrado</Text>
-              <View style={styles.balanceDividerLight} />
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Disponível</Text>
-                <Text style={styles.txAmount}>{money(available)}</Text>
-              </View>
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Reservado (caixinhas)</Text>
-                <Text style={styles.txAmount}>{money(reserved)}</Text>
-              </View>
-              <View style={styles.reportLine}>
-                <Text style={styles.muted}>Dívidas em aberto</Text>
-                <Text style={styles.expense}>{money(debtOutstanding)}</Text>
-              </View>
+            <View style={s.statCard}>
+              <Text style={[s.statLabel, { marginBottom: 10 }]}>Despesas</Text>
+              {tagMap.filter(([, v]) => v.out > 0).length === 0 ? (
+                <Text style={{ color: t.muted, marginBottom: 8 }}>Sem despesas neste mês.</Text>
+              ) : (
+                <PieChart
+                  items={tagMap.filter(([, v]) => v.out > 0).map(([tag, v]) => ({ label: tag, value: v.out }))}
+                  t={t}
+                />
+              )}
             </View>
           </>
         )}
       </ScrollView>
 
-      <View style={styles.tabBar}>
-        <TabButton
-          label="Início"
-          icon="⌂"
-          active={tab === "home"}
-          onPress={() => setTab("home")}
-        />
-        <TabButton
-          label="Movimentar"
-          icon="⇄"
-          active={tab === "activity"}
-          onPress={() => setTab("activity")}
-        />
-        <TabButton
-          label="Caixinhas"
-          icon="◎"
-          active={tab === "goals"}
-          onPress={() => setTab("goals")}
-        />
-        <TabButton
-          label="Dívidas"
-          icon="▤"
-          active={tab === "debts"}
-          onPress={() => setTab("debts")}
-        />
-        <TabButton
-          label="Gráficos"
-          icon="▥"
-          active={tab === "reports"}
-          onPress={() => setTab("reports")}
-        />
+      <View style={s.tabBar}>
+        <TabBtn label="Início" active={tab === "home"} onPress={() => setTab("home")} t={t} />
+        <TabBtn label="Fatura" active={tab === "invoice"} onPress={() => setTab("invoice")} t={t} />
+        <TabBtn label="Lançar" active={tab === "add"} onPress={() => setTab("add")} t={t} />
+        <TabBtn label="Análise" active={tab === "analysis"} onPress={() => setTab("analysis")} t={t} />
       </View>
-      <Text style={styles.signature}>Feito por @WenderG</Text>
+      <Text style={s.signature}>@WenderG</Text>
     </SafeAreaView>
   );
 }
 
-function SectionTitle({ title }: { title: string }) {
-  return <Text style={styles.sectionTitle}>{title}</Text>;
+function Quick({
+  label,
+  onPress,
+  t,
+}: {
+  label: string;
+  onPress: () => void;
+  t: ReturnType<typeof useTheme>;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        flex: 1,
+        backgroundColor: t.card,
+        borderRadius: 14,
+        paddingVertical: 14,
+        alignItems: "center",
+        borderWidth: 1,
+        borderColor: t.border,
+      }}
+    >
+      <Text style={{ color: t.text, fontWeight: "700", fontSize: 12 }}>{label}</Text>
+    </Pressable>
+  );
 }
 
-function Empty({ text }: { text: string }) {
+function Empty({ text, t }: { text: string; t: ReturnType<typeof useTheme> }) {
   return (
-    <View style={styles.empty}>
-      <Text style={styles.emptyText}>{text}</Text>
+    <View
+      style={{
+        backgroundColor: t.card,
+        padding: 18,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: t.border,
+        marginBottom: 10,
+      }}
+    >
+      <Text style={{ color: t.muted, textAlign: "center", fontSize: 13 }}>{text}</Text>
     </View>
   );
 }
@@ -1017,439 +687,375 @@ function Field({
   onChange,
   placeholder,
   keyboard,
+  t,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
   keyboard?: any;
+  t: ReturnType<typeof useTheme>;
 }) {
   return (
-    <View style={styles.field}>
-      <Text style={styles.fieldLabel}>{label}</Text>
+    <View style={{ marginBottom: 12 }}>
+      <Text style={{ color: t.muted, fontSize: 12, fontWeight: "700", marginBottom: 6 }}>
+        {label}
+      </Text>
       <TextInput
         value={value}
         onChangeText={onChange}
         placeholder={placeholder}
-        placeholderTextColor="#7D8A9A"
+        placeholderTextColor={t.muted}
         keyboardType={keyboard || "default"}
-        style={styles.input}
+        style={{
+          backgroundColor: t.inputBg,
+          borderWidth: 1,
+          borderColor: t.border,
+          borderRadius: 11,
+          paddingHorizontal: 13,
+          paddingVertical: 12,
+          color: t.text,
+          fontSize: 14,
+        }}
       />
     </View>
   );
 }
 
-function TransactionRow({ tx }: { tx: Tx }) {
-  const positive = tx.kind === "income";
+function Row({
+  title,
+  meta,
+  value,
+  positive,
+  onDelete,
+  t,
+}: {
+  title: string;
+  meta: string;
+  value: string;
+  positive: boolean;
+  onDelete: () => void;
+  t: ReturnType<typeof useTheme>;
+}) {
   return (
-    <View style={styles.transaction}>
+    <Pressable
+      onLongPress={onDelete}
+      style={{
+        backgroundColor: t.card,
+        borderRadius: 14,
+        padding: 14,
+        marginBottom: 8,
+        borderWidth: 1,
+        borderColor: t.border,
+        flexDirection: "row",
+        alignItems: "center",
+      }}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: t.text, fontWeight: "700", fontSize: 14 }}>{title}</Text>
+        <Text style={{ color: t.muted, fontSize: 11, marginTop: 3 }}>{meta} · segure para excluir</Text>
+      </View>
+      <Text style={{ color: positive ? t.accent : t.danger, fontWeight: "800", fontSize: 13 }}>
+        {positive ? "+" : "−"} {value}
+      </Text>
+    </Pressable>
+  );
+}
+
+function TabBtn({
+  label,
+  active,
+  onPress,
+  t,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+  t: ReturnType<typeof useTheme>;
+}) {
+  return (
+    <Pressable onPress={onPress} style={{ alignItems: "center", minWidth: 70 }}>
+      <Text style={{ color: active ? t.accent : t.muted, fontWeight: "800", fontSize: 13 }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+
+
+const PIE_COLORS = ["#16A875", "#E16F6F", "#D29A42", "#5B8DEF", "#A78BFA", "#F472B6", "#38BDF8", "#FBBF24"];
+
+/** Divisão por categorias — visual tipo pizza (sem lib externa) */
+function PieChart({
+  items,
+  t,
+}: {
+  items: { label: string; value: number }[];
+  t: ReturnType<typeof useTheme>;
+}) {
+  const total = items.reduce((s, i) => s + i.value, 0) || 1;
+  const sorted = [...items].sort((a, b) => b.value - a.value);
+  const slices = sorted.map((item, idx) => ({
+    ...item,
+    color: PIE_COLORS[idx % PIE_COLORS.length],
+    pct: (item.value / total) * 100,
+  }));
+
+  return (
+    <View>
       <View
-        style={[
-          styles.txIcon,
-          positive ? styles.txIconIn : styles.txIconOut,
-        ]}
+        style={{
+          height: 18,
+          borderRadius: 9,
+          overflow: "hidden",
+          flexDirection: "row",
+          backgroundColor: t.inputBg,
+          marginBottom: 14,
+        }}
       >
-        <Text
+        {slices.map((sl) => (
+          <View
+            key={sl.label}
+            style={{
+              width: (Math.max(2, sl.pct) + "%") as any,
+              backgroundColor: sl.color,
+              height: "100%" as any,
+            }}
+          />
+        ))}
+      </View>
+
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12, justifyContent: "center" }}>
+        {slices.map((sl) => (
+          <View
+            key={sl.label + "-chip"}
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 36,
+              backgroundColor: sl.color,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Text style={{ color: "#fff", fontWeight: "900", fontSize: 14 }}>{sl.pct.toFixed(0)}%</Text>
+          </View>
+        ))}
+      </View>
+
+      {slices.map((sl) => (
+        <View
+          key={sl.label}
           style={{
-            color: positive ? "#36C98F" : "#F07878",
-            fontSize: 19,
+            flexDirection: "row",
+            alignItems: "center",
+            marginBottom: 8,
+            justifyContent: "space-between",
           }}
         >
-          {positive ? "↙" : "↗"}
-        </Text>
-      </View>
-      <View style={styles.txInfo}>
-        <Text style={styles.txTitle}>{tx.title}</Text>
-        <Text style={styles.txMeta}>
-          {tx.category} ·{" "}
-          {new Date(tx.created_at).toLocaleDateString("pt-BR")}
-        </Text>
-      </View>
-      <Text
-        style={[
-          styles.txAmount,
-          { color: positive ? "#36C98F" : "#F07878" },
-        ]}
-      >
-        {positive ? "+" : "−"} {money(tx.amount)}
-      </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+            <View
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: 3,
+                backgroundColor: sl.color,
+                marginRight: 8,
+              }}
+            />
+            <Text style={{ color: t.text, fontSize: 12, fontWeight: "600" }} numberOfLines={1}>
+              {sl.label}
+            </Text>
+          </View>
+          <Text style={{ color: t.muted, fontSize: 12, fontWeight: "700" }}>
+            {sl.pct.toFixed(0)}% · {money(sl.value)}
+          </Text>
+        </View>
+      ))}
     </View>
   );
 }
 
-function QuickAction({
-  icon,
-  label,
-  onPress,
+/** Linha simplificada por categoria */
+function LineChart({
+  items,
+  color,
+  t,
 }: {
-  icon: string;
-  label: string;
-  onPress: () => void;
+  items: { label: string; value: number }[];
+  color: string;
+  t: ReturnType<typeof useTheme>;
 }) {
+  const maxV = Math.max(1, ...items.map((i) => i.value));
+  const h = 120;
+
   return (
-    <Pressable style={styles.quickAction} onPress={onPress}>
-      <Text style={styles.quickIcon}>{icon}</Text>
-      <Text style={styles.quickLabel}>{label}</Text>
-    </Pressable>
+    <View>
+      <View style={{ height: h, flexDirection: "row", alignItems: "flex-end", gap: 6, paddingHorizontal: 4 }}>
+        {items.map((item) => {
+          const barH = Math.max(6, (item.value / maxV) * (h - 24));
+          return (
+            <View key={item.label} style={{ flex: 1, alignItems: "center" }}>
+              <Text style={{ color: t.muted, fontSize: 9, marginBottom: 4 }} numberOfLines={1}>
+                {money(item.value)}
+              </Text>
+              <View
+                style={{
+                  width: 10,
+                  height: barH,
+                  borderRadius: 5,
+                  backgroundColor: color,
+                }}
+              />
+            </View>
+          );
+        })}
+      </View>
+      <View style={{ flexDirection: "row", marginTop: 8, gap: 4 }}>
+        {items.map((item) => (
+          <Text
+            key={item.label}
+            style={{ flex: 1, textAlign: "center", color: t.muted, fontSize: 9 }}
+            numberOfLines={1}
+          >
+            {item.label}
+          </Text>
+        ))}
+      </View>
+    </View>
   );
 }
 
-function TabButton({
-  label,
-  icon,
-  active,
-  onPress,
-}: {
-  label: string;
-  icon: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable style={styles.tabButton} onPress={onPress}>
-      <Text style={[styles.tabIcon, active && styles.tabActive]}>{icon}</Text>
-      <Text style={[styles.tabLabel, active && styles.tabActive]}>{label}</Text>
-    </Pressable>
-  );
+function makeStyles(t: ReturnType<typeof useTheme>) {
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: t.bg },
+    header: {
+      backgroundColor: t.header,
+      paddingHorizontal: 22,
+      paddingTop: Platform.OS === "android" ? (StatusBar.currentHeight || 28) + 12 : 16,
+      paddingBottom: 20,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    brand: { color: "#FFF", fontSize: 19, fontWeight: "900", letterSpacing: 1.2 },
+    headerSub: { color: "#AAB8C8", fontSize: 12, marginTop: 4 },
+    avatar: {
+      width: 40,
+      height: 40,
+      borderRadius: 14,
+      backgroundColor: "#24384E",
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: "#3B536B",
+    },
+    avatarText: { color: "#41D6A0", fontSize: 17, fontWeight: "800" },
+    content: { padding: 16, paddingBottom: 90 },
+    balanceCard: {
+      backgroundColor: "#142A40",
+      borderRadius: 22,
+      padding: 22,
+      marginBottom: 14,
+    },
+    mutedLight: { color: "#AABCCD", fontSize: 11, letterSpacing: 1, fontWeight: "700" },
+    balance: { color: "#FFF", fontSize: 32, fontWeight: "800", marginTop: 8 },
+    formula: { color: "#7F93A8", fontSize: 11, marginTop: 4 },
+    balanceDivider: { height: 1, backgroundColor: "#35516A", marginVertical: 16 },
+    balanceRow: { flexDirection: "row", justifyContent: "space-between" },
+    balanceSmall: { color: "#FFF", fontSize: 16, fontWeight: "700", marginTop: 5 },
+    statRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
+    statCard: {
+      flex: 1,
+      backgroundColor: t.card,
+      padding: 14,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: t.border,
+      marginBottom: 10,
+    },
+    statLabel: { color: t.muted, fontSize: 12, marginBottom: 6 },
+    income: { color: t.accent, fontWeight: "800", fontSize: 15 },
+    expense: { color: t.danger, fontWeight: "800", fontSize: 15 },
+    section: {
+      color: t.text,
+      fontSize: 17,
+      fontWeight: "800",
+      marginTop: 8,
+      marginBottom: 12,
+    },
+    quickRow: { flexDirection: "row", gap: 8, marginBottom: 10 },
+    formCard: {
+      backgroundColor: t.card,
+      padding: 16,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    segment: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      backgroundColor: t.inputBg,
+      padding: 4,
+      borderRadius: 12,
+      marginBottom: 14,
+      gap: 4,
+    },
+    segmentBtn: {
+      paddingVertical: 10,
+      paddingHorizontal: 10,
+      borderRadius: 9,
+      minWidth: "47%",
+      alignItems: "center",
+    },
+    segmentActive: { backgroundColor: "#142A40" },
+    segmentText: { color: t.muted, fontWeight: "700", fontSize: 12 },
+    segmentTextActive: { color: "#FFF" },
+    primaryBtn: {
+      backgroundColor: t.accent,
+      padding: 14,
+      alignItems: "center",
+      borderRadius: 12,
+      marginTop: 4,
+    },
+    primaryBtnText: { color: "#FFF", fontWeight: "800", fontSize: 14 },
+    rowBetween: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    barTrack: {
+      height: 10,
+      backgroundColor: t.inputBg,
+      borderRadius: 8,
+      overflow: "hidden",
+      marginTop: 6,
+    },
+    barFill: { height: 10, borderRadius: 8 },
+    divider: { height: 1, backgroundColor: t.border, marginVertical: 12 },
+    muted: { color: t.muted, fontSize: 12 },
+    tabBar: {
+      flexDirection: "row",
+      backgroundColor: t.tabBg,
+      borderTopWidth: 1,
+      borderColor: t.border,
+      paddingTop: 12,
+      // Espaço grande para não ficar sob os botões do sistema (Samsung etc.)
+      paddingBottom: Platform.OS === "android" ? 48 : 24,
+      justifyContent: "space-around",
+      minHeight: Platform.OS === "android" ? 72 : 56,
+    },
+    signature: {
+      display: "none",
+    },
+  });
 }
 
 export default function App() {
   return (
-    <SQLiteProvider databaseName="wenderbank.db" onInit={initialize}>
+    <SQLiteProvider databaseName="wenderbank_v2.db" onInit={initialize}>
       <AppContent />
     </SQLiteProvider>
   );
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#F3F6FA" },
-  header: {
-    backgroundColor: "#101C2C",
-    paddingHorizontal: 22,
-    paddingTop: Platform.OS === "android" ? 18 : 10,
-    paddingBottom: 22,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  brand: {
-    color: "#FFFFFF",
-    fontSize: 19,
-    fontWeight: "900",
-    letterSpacing: 1.2,
-  },
-  brandAccent: { color: "#41D6A0" },
-  headerSub: { color: "#AAB8C8", fontSize: 12, marginTop: 4 },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: "#24384E",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#3B536B",
-  },
-  avatarText: { color: "#41D6A0", fontSize: 17, fontWeight: "800" },
-  content: { padding: 18, paddingBottom: 28 },
-  balanceCard: {
-    backgroundColor: "#142A40",
-    borderRadius: 22,
-    padding: 22,
-    marginBottom: 14,
-  },
-  mutedLight: {
-    color: "#AABCCD",
-    fontSize: 11,
-    letterSpacing: 1,
-    fontWeight: "700",
-  },
-  balance: {
-    color: "#FFFFFF",
-    fontSize: 32,
-    fontWeight: "800",
-    marginTop: 8,
-  },
-  balanceDivider: {
-    height: 1,
-    backgroundColor: "#35516A",
-    marginVertical: 18,
-  },
-  balanceRow: { flexDirection: "row", justifyContent: "space-between" },
-  balanceSmall: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "700",
-    marginTop: 5,
-  },
-  statRow: { flexDirection: "row", gap: 12, marginBottom: 14 },
-  statCard: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-    padding: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#E7ECF2",
-  },
-  statLabel: { color: "#758397", fontSize: 12, marginBottom: 8 },
-  income: { color: "#16A875", fontWeight: "800", fontSize: 15 },
-  expense: { color: "#E16F6F", fontWeight: "800", fontSize: 15 },
-  sectionTitle: {
-    color: "#172638",
-    fontSize: 18,
-    fontWeight: "800",
-    marginTop: 10,
-    marginBottom: 13,
-  },
-  quickRow: { flexDirection: "row", gap: 10, marginBottom: 12 },
-  quickAction: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#E7ECF2",
-  },
-  quickIcon: { color: "#16A875", fontSize: 25, fontWeight: "700" },
-  quickLabel: {
-    color: "#34465A",
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 7,
-  },
-  transaction: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 14,
-    padding: 13,
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: "#E9EEF4",
-  },
-  txIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 11,
-  },
-  txIconIn: { backgroundColor: "#E6F8F0" },
-  txIconOut: { backgroundColor: "#FCEEEE" },
-  txInfo: { flex: 1 },
-  txTitle: { color: "#1C2C3E", fontWeight: "700", fontSize: 13 },
-  txMeta: { color: "#8793A2", fontSize: 11, marginTop: 4 },
-  txAmount: { fontSize: 12, fontWeight: "800" },
-  formCard: {
-    backgroundColor: "#FFFFFF",
-    padding: 16,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#E6ECF2",
-    marginBottom: 16,
-  },
-  segment: {
-    flexDirection: "row",
-    backgroundColor: "#EFF3F7",
-    padding: 4,
-    borderRadius: 12,
-    marginBottom: 16,
-  },
-  segmentButton: {
-    flex: 1,
-    padding: 11,
-    alignItems: "center",
-    borderRadius: 9,
-  },
-  segmentActive: { backgroundColor: "#142A40" },
-  segmentText: { color: "#718096", fontWeight: "700", fontSize: 12 },
-  segmentTextActive: { color: "#FFFFFF" },
-  field: { marginBottom: 13 },
-  fieldLabel: {
-    color: "#4B5B6E",
-    fontSize: 12,
-    fontWeight: "700",
-    marginBottom: 7,
-  },
-  input: {
-    backgroundColor: "#F5F7FA",
-    borderWidth: 1,
-    borderColor: "#E3E9F0",
-    borderRadius: 11,
-    paddingHorizontal: 13,
-    paddingVertical: 12,
-    color: "#1B2A3B",
-    fontSize: 14,
-  },
-  primaryButton: {
-    backgroundColor: "#16A875",
-    padding: 14,
-    alignItems: "center",
-    borderRadius: 12,
-    marginTop: 4,
-  },
-  primaryButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 13 },
-  empty: {
-    backgroundColor: "#FFFFFF",
-    padding: 20,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#E9EEF4",
-  },
-  emptyText: { color: "#8491A0", fontSize: 13, textAlign: "center" },
-  hint: {
-    color: "#9AA5B2",
-    fontSize: 10,
-    marginTop: -5,
-    marginBottom: 8,
-    marginLeft: 10,
-  },
-  intro: {
-    color: "#748295",
-    lineHeight: 20,
-    fontSize: 13,
-    marginBottom: 14,
-  },
-  goalCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#E7ECF2",
-  },
-  goalTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  goalName: {
-    color: "#1D2D40",
-    fontSize: 15,
-    fontWeight: "800",
-    flex: 1,
-  },
-  goalPct: { color: "#16A875", fontWeight: "900" },
-  goalSaved: {
-    color: "#1D2D40",
-    fontSize: 19,
-    fontWeight: "800",
-    marginTop: 12,
-    marginBottom: 12,
-  },
-  muted: { color: "#8A96A5", fontSize: 12, fontWeight: "500" },
-  progressTrack: {
-    height: 9,
-    backgroundColor: "#EAF0F4",
-    borderRadius: 10,
-    overflow: "hidden",
-    marginBottom: 8,
-  },
-  progressFill: {
-    height: 9,
-    backgroundColor: "#16A875",
-    borderRadius: 10,
-  },
-  outlineButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: "#16A875",
-    borderRadius: 10,
-    padding: 11,
-    alignItems: "center",
-    marginTop: 14,
-  },
-  outlineText: { color: "#139568", fontWeight: "800", fontSize: 12 },
-  contributeBox: { marginTop: 14 },
-  buttonRow: { flexDirection: "row", gap: 8, marginTop: 4 },
-  secondaryButton: {
-    flex: 1,
-    padding: 13,
-    alignItems: "center",
-    borderRadius: 10,
-    backgroundColor: "#EDF1F5",
-    marginTop: 14,
-  },
-  secondaryText: { color: "#526174", fontWeight: "700" },
-  primaryButtonFlex: {
-    flex: 1,
-    padding: 13,
-    alignItems: "center",
-    borderRadius: 10,
-    backgroundColor: "#16A875",
-  },
-  tabBar: {
-    flexDirection: "row",
-    backgroundColor: "#FFFFFF",
-    borderTopWidth: 1,
-    borderColor: "#E5EAF0",
-    paddingTop: 9,
-    paddingBottom: 7,
-    justifyContent: "space-around",
-  },
-  tabButton: { alignItems: "center", minWidth: 68 },
-  tabIcon: { color: "#97A3B1", fontSize: 21, fontWeight: "700" },
-  tabLabel: {
-    color: "#97A3B1",
-    fontSize: 10,
-    marginTop: 2,
-    fontWeight: "700",
-  },
-  tabActive: { color: "#16A875" },
-  debtSummary: {
-    backgroundColor: "#263B50",
-    padding: 17,
-    borderRadius: 15,
-    marginBottom: 12,
-  },
-  debtTotal: {
-    color: "#FFFFFF",
-    fontSize: 25,
-    fontWeight: "800",
-    marginTop: 5,
-  },
-  reportLine: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: 12,
-  },
-  reportTrack: {
-    height: 10,
-    backgroundColor: "#EDF1F5",
-    borderRadius: 8,
-    overflow: "hidden",
-    marginTop: 7,
-  },
-  reportIncome: {
-    height: 10,
-    backgroundColor: "#16A875",
-    borderRadius: 8,
-  },
-  reportExpense: {
-    height: 10,
-    backgroundColor: "#E16F6F",
-    borderRadius: 8,
-  },
-  reportBalance: {
-    color: "#142A40",
-    fontSize: 25,
-    fontWeight: "900",
-    marginTop: 10,
-  },
-  balanceDividerLight: {
-    height: 1,
-    backgroundColor: "#E8EDF2",
-    marginVertical: 12,
-  },
-  signature: {
-    textAlign: "center",
-    color: "#A2ACB8",
-    backgroundColor: "#FFFFFF",
-    fontSize: 9,
-    paddingBottom: 5,
-    letterSpacing: 0.4,
-  },
-});

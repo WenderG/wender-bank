@@ -1,49 +1,43 @@
 # Wender Bank
 
-Aplicativo pessoal de controle financeiro criado por **@WenderG**.
-
-Pense nele como uma **planilha no celular**: você vê quanto entrou, quanto saiu e **quanto sobrou** (mesmo que seja negativo).
-
----
-
-## Instalação no celular (APK)
-
-1. Vá em **Releases** deste repositório
-2. Baixe o arquivo `.apk` da versão mais recente
-3. Abra o arquivo no celular e instale
-4. Se o Android pedir, permita “Instalar apps desconhecidos”
-
----
-
-## Funcionalidades
-
-- **Painel inicial** — saldo total, entradas, saídas e **resultado** (pode ser negativo)
-- **Movimentações** — lançamento livre de receitas e despesas
-- **Caixinhas** — reserve dinheiro para um objetivo quando você já tem o valor
-- **Dívidas / Parcelas** — só visualização (não altera o saldo sozinho)
-- **Resumo** — gráficos de colunas do mês e por categoria
-- **Dados locais** — tudo salvo no aparelho
-
----
+Controle financeiro simples no estilo planilha.  
+Criado por **@WenderG**.
 
 ## Como funciona
 
-| Ação                        | Mexe no saldo?      |
-|----------------------------|---------------------|
-| Lançar Entrada / Saída     | Sim                 |
-| Registrar Dívida / Parcela | Não (só visual)     |
-| Guardar em Caixinha        | Reserva do disponível |
-| Excluir Caixinha           | Libera o reservado  |
+| Conceito | Regra |
+|----------|--------|
+| **Carteira** | Dinheiro disponível. Pode adicionar ou remover, mas nunca fica negativa. |
+| **Despesas** | O que você precisa pagar. Podem ser parceladas. |
+| **Saldo atual** | Carteira − despesas em aberto (pode ser negativo). |
+| **Entradas** | Valores positivos que entram na carteira. |
+| **Fatura** | Movimentações do mês vigente. |
+| **Tags** | Categorias para organizar e gerar gráficos. |
 
-O **resultado** (entradas − saídas) aparece em verde quando positivo e em vermelho quando negativo.
+Dados com mais de **6 meses** são apagados automaticamente.
 
----
+## Telas
 
-## Gerar APK
+- **Início** — saldo, carteira, despesas abertas
+- **Fatura** — entradas e despesas do mês (segure para excluir)
+- **Lançar** — nova entrada, despesa ou ajuste de carteira
+- **Análise** — gráficos do mês por tag
+
+## Instalação (APK)
+
+1. Em **Releases**, baixe o `.apk`
+2. Instale no celular
+
+## Desenvolvimento
 
 ```bash
 npm install
-eas login
+npx expo start
+```
+
+### Gerar APK
+
+```bash
 eas build --platform android --profile preview
 ```
 
@@ -56,4 +50,4 @@ eas build --platform android --profile preview
 
 ---
 
-Feito por **@WenderG**
+@WenderG
